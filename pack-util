@@ -1,0 +1,198 @@
+#!/usr/bin/python
+
+# .pack file format description:
+#
+# Note: Little-endian is always used.
+#
+# .pack file:
+# <int32> = NR_FILES          Number of files this .pack contains.
+# <int32>                     Pack format version? Seems to always be 0.
+# <file_record>*NR_FILES
+# <data_blob>*NR_FILES
+#
+#
+# file_record:
+# <80 bytes>                  Unpacked file's name buffer. File name must be
+#                             NULL-terminated or use the full buffer.
+# <int32>                     Size of uncompressed file.
+# <int32> = BLOB_SIZE         Size of (potentially) compressed file.
+# <int32>                     Offset in this file where the data blob
+#                             (compressed or not) is stored.
+# <12 bytes>                  Unknown. Doesn't seem to matter. The first 4 bytes
+#                             are always 0x0000, so it could be that the offset
+#                             actually is int64 (which would mean that .pack
+#                             files are not limited to 4 GiB size). The next 4
+#                             bytes seem to change for each file_record, and the
+#                             last 4 bytes seem to *almost* always be the same
+#                             throughout a .pack.
+# <4 bytes>                   Interpret as boolean; determines whether to use
+#                             zip compression for the corresponding data_blob.
+#                            
+#
+# data_blob:
+# <1 byte>*BLOB_SIZE          The packed file for the corresponding file_record.
+#                             Is zip compressed if so declared in the
+#                             file_record, otherwise it's just the file's raw
+#                             binary data.
+
+
+import sys
+import os
+import fnmatch
+import struct
+import zlib
+
+
+CMD = os.path.basename(sys.argv[0])
+PACK_FILE_HEADER_FMT = "I"*2
+FILE_NAME_BUFFER_SIZE = 0x80
+# Here we treat the 12 unkown bytes as three int32
+FILE_RECORD_INFO_FMT = "I"*7
+FILE_RECORD_SIZE = FILE_NAME_BUFFER_SIZE + struct.calcsize(FILE_RECORD_INFO_FMT)
+
+
+def read_unpack(fd, fmt):
+    return struct.unpack("<" + fmt, fd.read(struct.calcsize(fmt)))
+
+
+def unpack(fd, pack_dir):
+    nr_files, unknown = read_unpack(fd, PACK_FILE_HEADER_FMT)
+    for i in range(nr_files):
+        name_buf = fd.read(FILE_NAME_BUFFER_SIZE)
+        name_end = name_buf.find("\0")
+        if name_end == -1:
+            name_end = len(name_buf)
+        name = name_buf[:name_end]
+        # XXX: The meaning of x, y and z are unkown
+        size, zsize, offset, x, y, z, is_zipped = \
+            read_unpack(fd, FILE_RECORD_INFO_FMT)
+        next_file_record_pos = fd.tell()
+        fd.seek(offset)
+        if is_zipped:
+            data = zlib.decompress(fd.read(zsize))
+            assert len(data) == size
+        else:
+            data = fd.read(size)
+        fd.seek(next_file_record_pos)
+        f_out = os.path.join(pack_dir, name)
+        with open(f_out, "w") as fd_out:
+            fd_out.write(data)
+        sys.stdout.write("Extracted {} ".format(f_out))
+        if is_zipped:
+            sys.stdout.write("({} bytes => {} bytes)\n".format(zsize, size))
+        else:
+            sys.stdout.write("({} bytes, no compression)\n".format(size))
+
+
+def write_pack(fd, fmt, *data):
+    fd.write(struct.pack("<" + fmt, *data))
+
+
+def pack(pack_dir, fd, no_zip_patterns = []):
+    file_list = [os.path.join(pack_dir,f) for f in os.listdir(pack_dir)]
+    nr_files = len(file_list)
+    unkown = 0
+    write_pack(fd, PACK_FILE_HEADER_FMT, nr_files, unkown)
+    prev_record_offset = fd.tell()
+    fd.write(nr_files * FILE_RECORD_SIZE * "\0")
+    prev_blob_offset = fd.tell()
+    for f in file_list:
+        offset = prev_blob_offset
+        name = os.path.basename(f)
+        use_zip = True
+        for p in no_zip_patterns:
+            if fnmatch.fnmatch(name, p):
+                use_zip = False
+                break
+        assert len(name) <= FILE_NAME_BUFFER_SIZE
+        name_buf = name + ("\0"*(FILE_NAME_BUFFER_SIZE-len(name)))
+        data = ""
+        with open(f, 'r') as f_fd:
+            data = f_fd.read()
+        size = len(data)
+        if use_zip:
+            data = zlib.compress(data)
+        zsize = len(data)
+        fd.seek(prev_record_offset)
+        fd.write(name_buf)
+        # XXX: We don't know what the following 12 bytes are for:
+        # XXX: Seems to always be zero.
+        x = 0
+        # XXX: Set these two high in case they deal with priority.
+        y = 0xffffffff
+        z = 0xffffffff
+        write_pack(fd, FILE_RECORD_INFO_FMT, size, zsize, offset,
+                                             x, y, z, use_zip)
+        prev_record_offset = fd.tell()
+        fd.seek(prev_blob_offset)
+        fd.write(data)
+        prev_blob_offset = fd.tell()
+        sys.stdout.write("Imported {} ".format(f, size))
+        if use_zip:
+            sys.stdout.write("({} bytes => {} bytes)\n".format(size, zsize))
+        else:
+            sys.stdout.write("({} bytes, no compression)\n".format(size))
+
+
+def usage_and_exit(ret):
+    usage = """\
+Usage: {cmd} unpack PACK_FILE DIR
+       {cmd} pack DIR PACK_FILE [DONT_COMPRESS]...
+Pack or unpack .pack files. When packing, all files in the DONT_COMPRESS list
+(defaults to empty) are not compressed, but the rest are. Note that you may
+have to quote '*' and other characters that are treated specially by your shell
+when writing DONT_COMPRESS patterns
+
+Example:
+    {cmd} unpack d110.pack d110
+extracts all files packed inside 'd110.pack' into the 'd110' directory
+(overwriting any existing files with the extracted files' names).
+    {cmd} pack d110 d110.pack '*'.jpg test.dds
+packs all files in the directory 'd110' into file 'd110.pack' (overwriting it if
+already existing). All files will be compressed when packed, except all files
+with the file extensions 'jpg', and the specific file 'test.dds'.
+""".format(cmd = CMD)
+    if ret == 0:
+        sys.stdout.write(usage)
+    else:
+        sys.stderr.write(usage)
+    sys.exit(ret)
+
+
+def error_and_exit(msg):
+    sys.stderr.write("{}: {}\n".format(CMD, msg))
+    sys.stderr.write("Try `{} --help` for more information.\n".format(CMD))
+    sys.exit(1)
+
+
+# main:
+
+for arg in sys.argv[1:]:
+    if arg in ['--help', '-h', '/h', '/?']:
+        usage_and_exit(0)
+if len(sys.argv) < 2:
+    usage_and_exit(1)
+action = sys.argv[1]
+if action == "unpack":
+    if len(sys.argv) != 4:
+        error_and_exit("unpack needs exactly two arguments")
+    pack_file = sys.argv[2]
+    pack_dir = sys.argv[3]
+    if not os.path.isdir(pack_dir):
+        os.mkdir(pack_dir)
+    with open(pack_file, "rb") as fd:
+        unpack(fd, pack_dir)
+elif action in "pack":
+    if len(sys.argv) < 4:
+        sys.stderr.write("pack needs at least two arguments")
+        usage_and_exit(1)
+    pack_dir = sys.argv[2]
+    pack_file = sys.argv[3]
+    no_zip_patterns = sys.argv[4:]
+    if not os.path.isdir(pack_dir):
+        error_and_exit("'{}' is not a directory or does not exist".format(pack_dir))
+    with open(pack_file, "wb") as fd:
+        pack(pack_dir, fd, no_zip_patterns)
+else:
+    error_and_exit("unknown action '{}'".format(action))
+

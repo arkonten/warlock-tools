@@ -1,0 +1,431 @@
+#!/usr/bin/python
+
+# TXML bin v2.0 file format description:
+#
+# Note: Little-endian is always used.
+#
+# TXML file:
+# <12 bytes>                  File header, should be "txml binv2.0".
+# <4 bytes>                   Unknown, but values doesn't seem to have effect.
+# <16 bytes>                  All seem to always be 0x00.
+# <int32> = NR_STRINGS        The number of strings in string_blob.
+# <int32> = STRINGS_SIZE      The total length of string_blob.
+# <string_record>*NR_STRINGS  See definition below. Sorted in ascending order
+#                             with respect to the offset. First one always has
+#                             offset 0 and length 0 for the empty string.
+# <string_blob>               See definition below.
+# <node>                      See definition below.
+#
+#
+# string_record:
+# <int32>                     Offset of some string S in string blob.
+# <int32>                     Length of string S.
+#
+#
+# string_blob:
+# <1 byte>*STRINGS_SIZE       This is all strings used in the TXML concatenated.
+#                             The offset of string_record:s are with respect to
+#                             this blob, and when we talk of a number n being
+#                             "index of string", we mean the string described
+#                             by the n:th string_record.
+#
+# node:
+# <int32>                     Index of string to use for node tag.
+# <int32> = NR_ATTRS          Number of attributes of node.
+# <node_attr>*NR_ATTRS        See definition below. Note: can be empty.
+# <int32> = NR_VALS           Number of value nodes.
+# <val_node>*NR_VALS          See definition below. Note: can be empty.
+# <int32> = NR_SUB_NODES      Number of sub-nodes.
+# <node>*NR_SUB_NODES         Recursive definition. Note: can be empty.
+#
+#
+# node_attr:
+# <int32>                     Index of string to use for attribute name.
+# <int32>                     Index of string to use for attribute value.
+#
+#
+# val_node:
+# <int32>                     Index of string to use for node tag.
+# <int32> = TYPE              Value node type.
+# <TYPE-specific data>        Depends on the value node type, TYPE. See below.
+#
+#
+# Value node types:
+#
+# 0:                          (Integer)
+# <int32>                     Integer value.
+#
+# 1:                          (Floating point number)
+# <float32>                   Floatting point value.
+#
+# 2:                          (String)
+# <int32>                     Index of string to use as value.
+#
+# 3:                          (Float)
+# <1 byte>                    Boolean value.
+#
+# 4:                          (Long long integer)
+# <int64>                     64-bit integer value.
+#
+# 5:                          (2D point with integer values)
+# <int32>                     X coordinate.
+# <int32>                     Y coordinate.
+#
+# 6:                          (2D point with floating point values)
+# <float32>                   X coordinate.
+# <float32>                   Y coordinate.
+#
+# 7:                          (3D point with floating point values)
+# <float32>                   X coordinate.
+# <float32>                   Y coordinate.
+# <float32>                   Z coordinate.
+#
+# 8:                          (RGBA color)
+# <1 byte>                    Red.
+# <1 byte>                    Green.
+# <1 byte>                    Blue.
+# <1 byte>                    Alpha.
+#
+# 9:                          (Byte array)
+# <int32>                     Length of byte array. Let's call it LEN.
+# <1 byte>*LEN                Byte array values.
+#
+# 10:                         (Size)
+# <int32> (or float32?)       Width?
+# <int32> (or float32?)       Height?
+#
+# 11:                         (Rectangle)
+# <int32> (or float32?)       X coordinate of some corner?
+# <int32> (or float32?)       Y coordinate of some corner?
+# <int32> (or float32?)       Width in some direction w.r.t corner (X,Y)?
+# <int32> (or float32?)       Height in some direction w.r.t corner (X,Y)?
+#
+# 12:                         (Short integer)
+# <int16>                     16-bit integer value.
+#
+#
+# Warning! Since I never encountered TXML value node types 4 (64-bit
+# integer), 10 (Size), 11 (Rectangle) and 12 (16-bit integer) the code
+# dealing with them could be incorrect, but I'm pretty sure at least 4
+# (64-bit integer) and 12 (16-bit integer) are ok. The only time this
+# could become a problem is if a patch or DLC introduces TXMLs using
+# these types (all existing content as of April 2013 are ok).
+
+import sys
+import os
+import struct
+import xml.etree.ElementTree
+
+
+_write_output_fd = sys.stdout
+XML_INDENT = " "*2
+TXML_HEADER = "txml binv2.0"
+# We don't know what TXML_HEADER_UNKOWN is. In case it's some kind of
+# priority number we max it so our TXML files are prioritised.
+TXML_HEADER_UNKOWN = "\xff"*4
+TXML_NULL_SPACER = "\0"*16
+TXML_TYPE_DESCS_FROM_I = {
+     0: ("integer",    [("I", "value")]),
+     1: ("float",      [("f", "value")]),
+     # 'string' requires special treatment
+     2: ("string",     [("I", "value")]),
+     3: ("bool",       [("?", "value")]),
+     4: ("long",       [("Q", "value")]),
+     5: ("2d_point_i", [("I", "x"), ("I", "y")]),
+     6: ("2d_point_f", [("f", "x"), ("f", "y")]),
+     7: ("3d_point_f", [("f", "x"), ("f", "y"), ("f", "z")]),
+     8: ("color",      [("B", "r"), ("B", "g"), ("B", "b"), ("B", "a")]),
+     # 'byte_array' requires special treatment
+     9: ("byte_array", [("I", "value")]),  
+    10: ("size",       [("I", "width"), ("I", "height")]),
+    11: ("rectangle",  [("I", "x"), ("I", "y"),
+                        ("I", "width"), ("I", "height")]),
+    12: ("short",      [("H", "value")]),
+    }
+TXML_TYPE_DESCS_FROM_STR = {type_str: (type_i, attrs) for type_i, (type_str, attrs) in TXML_TYPE_DESCS_FROM_I.items()}
+
+
+def integer_is_txml_type(type_i):
+    return type_i in TXML_TYPE_DESCS_FROM_I
+
+
+def get_txml_type_desc_from_integer(type_i):
+    return TXML_TYPE_DESCS_FROM_I[type_i]
+
+
+def string_is_txml_type(type_str):
+    return type_str in TXML_TYPE_DESCS_FROM_STR
+
+
+def get_txml_type_desc_from_string(type_str):
+    return TXML_TYPE_DESCS_FROM_STR[type_str]
+
+
+def read_unpack(fd, fmt):
+    return struct.unpack("<" + fmt, fd.read(struct.calcsize(fmt)))
+
+
+def read_txml_value_node_attrs(fd, itos):
+    value_type_offset = fd.tell()
+    type_i, = read_unpack(fd, "I")
+    if not integer_is_txml_type(type_i):
+        raise Exception("Unknown type '{}' at offset 0x{:X}".format(type_i, value_type_offset))
+    type_str, attrs = get_txml_type_desc_from_integer(type_i)
+    if type_str == "string":
+        pack_fmt, attr_name = attrs[0]
+        string_index, = read_unpack(fd, pack_fmt)
+        xml_attrs_str = "{}='{}'".format(attr_name, itos[string_index])
+    elif type_str == "byte_array":
+        pack_fmt, attr_name = attrs[0]
+        array_length, = read_unpack(fd, pack_fmt)
+        data = read_unpack(fd, "B"*array_length)
+        byte_string = " ".join([("{:02X}".format(c)) for c in data])
+        xml_attrs_str = "{}='{}'".format(attr_name, byte_string)
+    else:
+        xml_attrs = []
+        for pack_fmt, attr_name in attrs:
+            val, = read_unpack(fd, pack_fmt)
+            if pack_fmt == "B":
+                attr_fmt = "'{:02X}'"
+            else:
+                attr_fmt = "'{}'"
+            xml_attrs.append(attr_name + "=" + attr_fmt.format(val))
+        xml_attrs_str = " ".join(xml_attrs)
+    return (type_str, xml_attrs_str)
+
+
+def write_xml_value_node(fd, itos, tab_level):
+    name_i, = read_unpack(fd, "I")
+    name = itos[name_i]
+    type_str, attrs_str = read_txml_value_node_attrs(fd, itos)
+    indent = tab_level*XML_INDENT
+    write("{}<{} type='{}' {}/>\n".format(indent, name, type_str, attrs_str))
+
+
+# node attributes always has implied type string
+def write_xml_node_attr(fd, itos):
+    attr_i, = read_unpack(fd, "I")
+    attr = itos[attr_i]
+    value_i, = read_unpack(fd, "I")
+    value = itos[value_i]
+    # We drop namespaces because python's elementtree makes it
+    # difficult to treat the namespace declaration as a normal
+    # attribute, which would complicate the attribute parsing/writing
+    # code quite a bit.
+    # XXX: This is not ok if they're used in-game, but that's unlikely.
+    if attr != "xmlns:xsi" and not attr.startswith("xsi:"):
+        write(" {}='{}'".format(attr, value))
+
+def write_xml_node(fd, itos, tab_level):
+    strings_i, = read_unpack(fd, "I")
+    name = itos[strings_i]
+    indent = tab_level*XML_INDENT
+    write("{}<{}".format(indent, name))
+    nr_node_attrs, = read_unpack(fd, "I")
+    for x in range(nr_node_attrs):
+        write_xml_node_attr(fd, itos)
+    write(">\n")
+    nr_value_nodes, = read_unpack(fd, "I")
+    for x in range(nr_value_nodes):
+        write_xml_value_node(fd, itos, tab_level + 1)
+    nr_subnodes, = read_unpack(fd, "I")
+    for x in range(nr_subnodes):
+        write_xml_node(fd, itos, tab_level + 1)
+    write("{}</{}>\n".format(indent, name))
+
+
+def at_end_of_file(fd):
+    offset = fd.tell()
+    fd.read(1)
+    ret = offset == fd.tell()
+    fd.seek(offset)
+    return ret
+
+
+def write_xml_from_txml(fd):
+    assert fd.read(len(TXML_HEADER)) == TXML_HEADER
+    header_magic = fd.read(len(TXML_HEADER_UNKOWN))  # XXX: what to do?
+    assert fd.read(len(TXML_NULL_SPACER)) == TXML_NULL_SPACER
+    nr_strings, = read_unpack(fd, "I")
+    strings_len, = read_unpack(fd, "I")
+    record_offset_len = 4
+    record_size_len = 4
+    record_len = record_offset_len + record_size_len
+    strings_blob_offset = fd.tell() + nr_strings*record_len
+    itos = []  # index -> string lookup
+    for r_i in range(nr_strings):
+        string_offset, = read_unpack(fd, "I")
+        string_size, = read_unpack(fd, "I")
+        next_string_record_offset = fd.tell()
+        fd.seek(strings_blob_offset + string_offset)
+        string = fd.read(string_size)
+        itos.append(string)
+        fd.seek(next_string_record_offset)
+    assert sum([len(s) for s in itos]) == strings_len
+    assert fd.tell() == strings_blob_offset
+    fd.seek(strings_blob_offset + strings_len)
+    write_xml_node(fd, itos, 0)
+    assert at_end_of_file(fd)
+
+
+def is_value_node(node):
+    return len(node) == 0 and \
+           "type" in node.attrib and \
+           string_is_txml_type(node.attrib["type"])
+
+
+def traverse_xml_for_strings(node, strings):
+    for child in node:
+        traverse_xml_for_strings(child, strings)
+    tag = node.tag
+    if not tag in strings:
+        strings.append(tag)
+    if is_value_node(node):
+        if node.attrib["type"] == "string":
+            val = node.attrib["value"]
+            if not val in strings:
+                strings.append(val)
+    else:
+        for attr, val in node.items():
+            if not attr in strings:
+                strings.append(attr)
+            if not val in strings:
+                strings.append(val)
+
+
+def write(s):
+    _write_output_fd.write(s)
+
+
+def write_pack(fmt, *data):
+    write(struct.pack("<" + fmt, *data))
+
+
+def write_txml_value_node(node, stoi):
+    write_pack("I", stoi[node.tag])
+    type_str = node.attrib["type"]
+    if not string_is_txml_type(type_str):
+        raise Exception("Unknown type '{}'".format(type_str))
+    type_i, attrs = get_txml_type_desc_from_string(type_str)
+    assert len(node.attrib) == len(attrs) + 1
+    write_pack("I", type_i)
+    if type_str == "string":
+        write_pack("I", stoi[node.attrib["value"]])
+    elif type_str == "byte_array":
+        data = [int(x, 16) for x in node.attrib["value"].split(" ")]
+        data_len = len(data)
+        write_pack("I", data_len)
+        write_pack("B"*data_len, *data)
+    else:
+        for pack_fmt, attr_name in attrs:
+            val_str = node.attrib[attr_name]
+            if   pack_fmt == "B":
+                val = int(val_str, 16)
+            elif pack_fmt in ["I", "Q", "H"]:
+                val = int(val_str)
+            elif pack_fmt == "f":
+                val = float(val_str)
+            elif pack_fmt == "?":
+                val = bool(val_str)
+            write_pack(pack_fmt, val)
+
+
+def write_txml_node(node, stoi):
+    tag_index = stoi[node.tag]
+    write_pack("I", tag_index)
+    write_pack("I", len(node.attrib))
+    # For non-value nodes, all attributes have implied type string, so
+    # no type is specified here, unlike for attributes in value nodes
+    for attr, val in node.attrib.items():
+        write_pack("I", stoi[attr])
+        write_pack("I", stoi[val])
+    value_nodes = []
+    sub_nodes = []
+    for child in node:
+        if is_value_node(child):
+            value_nodes.append(child)
+        else:
+            sub_nodes.append(child)
+    write_pack("I", len(value_nodes))
+    for value_node in value_nodes:
+        write_txml_value_node(value_node, stoi)
+    write_pack("I", len(sub_nodes))
+    for sub_node in sub_nodes:
+        write_txml_node(sub_node, stoi)
+
+
+def write_txml_from_xml(node):
+    write(TXML_HEADER)
+    write(TXML_HEADER_UNKOWN)  # XXX: how to compute magic header?
+    write(TXML_NULL_SPACER)
+    strings = [""]  # We always have the empty string
+    traverse_xml_for_strings(node, strings)
+    stoi = {s: i for i, s in enumerate(strings)}  # string -> index lookup
+    strings_blob = "".join(strings)
+    write_pack("I", len(strings))
+    write_pack("I", len(strings_blob))
+    offset = 0
+    for s in strings:
+        s_len = len(s)
+        write_pack("I", offset)
+        write_pack("I", s_len)
+        offset += s_len
+    write(strings_blob)
+    write_txml_node(node, stoi)
+
+
+def usage_and_exit(ret, errmsg = None):
+    cmd = os.path.basename(sys.argv[0])
+    usage = """\
+Usage: {cmd} toxml INPUT_TXML [OUTPUT_XML]
+       {cmd} fromxml INPUT_XML [OUTPUT_TXML]
+       {cmd} istxml FILE...
+The 'toxml' and 'fromxml' actions convert TXML files to/from XML files. If the
+optional output file is not specified, output is written to stdout.
+The 'istxml' action prints to stdout the paths to all FILEs which are in TXML
+format (only checks the file header, so they can still be incorrect/corrupted),
+which can be useful in scripts.
+""".format(cmd = cmd)
+    if ret == 0:
+        sys.stdout.write(usage)
+    else:
+        if errmsg:
+            sys.stderr.write("{cmd}: {msg}\n".format(cmd = cmd, msg = errmsg))
+        sys.stderr.write(usage)
+    sys.exit(ret)
+
+
+# main:
+
+for arg in sys.argv[1:]:
+    if arg in ['--help', '-help' '-h', '/h', '/?']:
+        usage_and_exit(0)
+nr_arguments = len(sys.argv)
+if nr_arguments < 2:
+    usage_and_exit(1, "too few arguments")
+action = sys.argv[1]
+if action in ["toxml", "fromxml"]:
+    if nr_arguments not in [3, 4]:
+        usage_and_exit(1, "incorrect number of arguments")
+    file_in = sys.argv[2]
+    if nr_arguments == 4:
+        file_out = sys.argv[3]
+        _write_output_fd = open(file_out, 'wb')
+    else:
+        _write_output_fd = sys.stdout
+    if action == "toxml":
+        with open(file_in, "rb") as fd:
+            write_xml_from_txml(fd)
+    elif action == "fromxml":
+        xmltree = xml.etree.ElementTree.parse(file_in)
+        write_txml_from_xml(xmltree.getroot())
+elif action == "istxml":
+    if nr_arguments < 3:
+        usage_and_exit(1, "too few arguments")
+    for f in sys.argv[2:]:
+        with open(f, "rb") as fd:
+            if fd.read(len(TXML_HEADER)) == TXML_HEADER:
+                sys.stdout.write("{}\n".format(f))
+else:
+    raise Exception("unknown action '{}'".format(action))
+sys.exit(0)
