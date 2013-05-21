@@ -1,41 +1,5 @@
 #!/usr/bin/python
 
-# .pack file format description:
-#
-# Note: Little-endian is always used.
-#
-# .pack file:
-# <int32> = NR_FILES          Number of files this .pack contains.
-# <int32>                     Pack format version? Seems to always be 0.
-# <file_record>*NR_FILES
-# <data_blob>*NR_FILES
-#
-#
-# file_record:
-# <80 bytes>                  Unpacked file's name buffer. File name must be
-#                             NULL-terminated or use the full buffer.
-# <int32>                     Size of uncompressed file.
-# <int32> = BLOB_SIZE         Size of (potentially) compressed file.
-# <int32>                     Offset in this file where the data blob
-#                             (compressed or not) is stored.
-# <12 bytes>                  Unknown. Doesn't seem to matter. The first 4 bytes
-#                             are always 0x0000, so it could be that the offset
-#                             actually is int64 (which would mean that .pack
-#                             files are not limited to 4 GiB size). The next 4
-#                             bytes seem to change for each file_record, and the
-#                             last 4 bytes seem to *almost* always be the same
-#                             throughout a .pack.
-# <4 bytes>                   Interpret as boolean; determines whether to use
-#                             zip compression for the corresponding data_blob.
-#                            
-#
-# data_blob:
-# <1 byte>*BLOB_SIZE          The packed file for the corresponding file_record.
-#                             Is zip compressed if so declared in the
-#                             file_record, otherwise it's just the file's raw
-#                             binary data.
-
-
 import sys
 import os
 import fnmatch
