@@ -25,7 +25,7 @@ TXML_TYPE_DESCS_FROM_I = {
      7: ("3d_point_f", [("f", "x"), ("f", "y"), ("f", "z")]),
      8: ("color",      [("B", "r"), ("B", "g"), ("B", "b"), ("B", "a")]),
      # 'byte_array' requires special treatment
-     9: ("byte_array", [("I", "value")]),  
+     9: ("byte_array", [("I", "value")]),
     10: ("size",       [("I", "width"), ("I", "height")]),
     11: ("rectangle",  [("I", "x"), ("I", "y"),
                         ("I", "width"), ("I", "height")]),
