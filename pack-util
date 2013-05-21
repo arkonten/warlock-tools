@@ -148,8 +148,7 @@ if action == "unpack":
         unpack(fd, pack_dir)
 elif action in "pack":
     if len(sys.argv) < 4:
-        sys.stderr.write("pack needs at least two arguments")
-        usage_and_exit(1)
+        error_and_exit("pack needs at least two arguments")
     pack_dir = sys.argv[2]
     pack_file = sys.argv[3]
     no_zip_patterns = sys.argv[4:]
