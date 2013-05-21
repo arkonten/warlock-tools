@@ -6,6 +6,7 @@ import struct
 import xml.etree.ElementTree
 
 
+CMD = os.path.basename(sys.argv[0])
 _write_output_fd = sys.stdout
 XML_INDENT = " "*2
 TXML_HEADER = "txml binv2.0"
@@ -263,8 +264,7 @@ def write_txml_from_xml(node):
     write_txml_node(node, stoi)
 
 
-def usage_and_exit(ret, errmsg = None):
-    cmd = os.path.basename(sys.argv[0])
+def usage_and_exit():
     usage = """\
 Usage: {cmd} toxml INPUT_TXML [OUTPUT_XML]
        {cmd} fromxml INPUT_XML [OUTPUT_TXML]
@@ -274,28 +274,29 @@ optional output file is not specified, output is written to stdout.
 The 'istxml' action prints to stdout the paths to all FILEs which are in TXML
 format (only checks the file header, so they can still be incorrect/corrupted),
 which can be useful in scripts.
-""".format(cmd = cmd)
-    if ret == 0:
-        sys.stdout.write(usage)
-    else:
-        if errmsg:
-            sys.stderr.write("{cmd}: {msg}\n".format(cmd = cmd, msg = errmsg))
-        sys.stderr.write(usage)
-    sys.exit(ret)
+""".format(cmd = CMD)
+    sys.stdout.write(usage)
+    sys.exit(0)
+
+
+def error_and_exit(msg):
+    sys.stderr.write("{}: {}\n".format(CMD, msg))
+    sys.stderr.write("Try `{} --help` for more information.\n".format(CMD))
+    sys.exit(1)
 
 
 # main:
 
 for arg in sys.argv[1:]:
     if arg in ['--help', '-help' '-h', '/h', '/?']:
-        usage_and_exit(0)
+        usage_and_exit()
 nr_arguments = len(sys.argv)
 if nr_arguments < 2:
-    usage_and_exit(1, "too few arguments")
+    error_and_exit("too few arguments")
 action = sys.argv[1]
 if action in ["toxml", "fromxml"]:
     if nr_arguments not in [3, 4]:
-        usage_and_exit(1, "incorrect number of arguments")
+        error_and_exit("incorrect number of arguments")
     file_in = sys.argv[2]
     if nr_arguments == 4:
         file_out = sys.argv[3]
@@ -310,11 +311,11 @@ if action in ["toxml", "fromxml"]:
         write_txml_from_xml(xmltree.getroot())
 elif action == "istxml":
     if nr_arguments < 3:
-        usage_and_exit(1, "too few arguments")
+        error_and_exit("too few arguments")
     for f in sys.argv[2:]:
         with open(f, "rb") as fd:
             if fd.read(len(TXML_HEADER)) == TXML_HEADER:
                 sys.stdout.write("{}\n".format(f))
 else:
-    raise Exception("unknown action '{}'".format(action))
+    error_and_exit("unknown action '{}'".format(action))
 sys.exit(0)

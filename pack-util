@@ -98,7 +98,7 @@ def pack(pack_dir, fd, no_zip_patterns = []):
             sys.stdout.write("({} bytes, no compression)\n".format(size))
 
 
-def usage_and_exit(ret):
+def usage_and_exit():
     usage = """\
 Usage: {cmd} unpack PACK_FILE DIR
        {cmd} pack DIR PACK_FILE [DONT_COMPRESS]...
@@ -116,11 +116,8 @@ packs all files in the directory 'd110' into file 'd110.pack' (overwriting it if
 already existing). All files will be compressed when packed, except all files
 with the file extensions 'jpg', and the specific file 'test.dds'.
 """.format(cmd = CMD)
-    if ret == 0:
-        sys.stdout.write(usage)
-    else:
-        sys.stderr.write(usage)
-    sys.exit(ret)
+    sys.stdout.write(usage)
+    sys.exit(0)
 
 
 def error_and_exit(msg):
@@ -133,12 +130,13 @@ def error_and_exit(msg):
 
 for arg in sys.argv[1:]:
     if arg in ['--help', '-h', '/h', '/?']:
-        usage_and_exit(0)
-if len(sys.argv) < 2:
-    usage_and_exit(1)
+        usage_and_exit()
+nr_arguments = len(sys.argv)
+if nr_arguments < 2:
+     error_and_exit("too few arguments")
 action = sys.argv[1]
 if action == "unpack":
-    if len(sys.argv) != 4:
+    if nr_arguments != 4:
         error_and_exit("unpack needs exactly two arguments")
     pack_file = sys.argv[2]
     pack_dir = sys.argv[3]
@@ -147,7 +145,7 @@ if action == "unpack":
     with open(pack_file, "rb") as fd:
         unpack(fd, pack_dir)
 elif action in "pack":
-    if len(sys.argv) < 4:
+    if nr_arguments < 4:
         error_and_exit("pack needs at least two arguments")
     pack_dir = sys.argv[2]
     pack_file = sys.argv[3]
@@ -158,4 +156,4 @@ elif action in "pack":
         pack(pack_dir, fd, no_zip_patterns)
 else:
     error_and_exit("unknown action '{}'".format(action))
-
+sys.exit(0)
