@@ -47,7 +47,7 @@ potential UNIX-isms):
 
     python pack-util pack my-mod-dir d130.pack
 
-8. Place new .pack file in your Warlock installation directory.
+8. Place the new .pack file in your Warlock installation directory.
 
 Note that naming the mod in the style of d130.pack may be important
 for the game to actually load the it. Also note that I haven't tried
